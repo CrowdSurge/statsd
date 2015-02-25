@@ -1,9 +1,9 @@
 package statsd
 
 import (
-	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/quipo/statsd/event"
@@ -23,7 +23,7 @@ type StatsdBuffer struct {
 	eventChannel  chan event.Event
 	events        map[string]event.Event
 	closeChannel  chan closeRequest
-	Logger        *log.Logger
+	Logger        Logger
 }
 
 // NewStatsdBuffer Factory
@@ -38,6 +38,11 @@ func NewStatsdBuffer(interval time.Duration, client *StatsdClient) *StatsdBuffer
 	}
 	go sb.collector()
 	return sb
+}
+
+// CreateSocket creates a UDP connection to a StatsD server
+func (sb *StatsdBuffer) CreateSocket() error {
+	return sb.statsd.CreateSocket()
 }
 
 // Incr - Increment a counter metric. Often used to note a particular event
@@ -62,6 +67,13 @@ func (sb *StatsdBuffer) Timing(stat string, delta int64) error {
 	return nil
 }
 
+// PrecisionTiming - Track a duration event
+// the time delta has to be a duration
+func (sb *StatsdBuffer) PrecisionTiming(stat string, delta time.Duration) error {
+	sb.eventChannel <- event.NewPrecisionTiming(stat, time.Duration(float64(delta)/float64(time.Millisecond)))
+	return nil
+}
+
 // Gauge - Gauges are a constant data type. They are not subject to averaging,
 // and they don’t change unless you change them. That is, once you set a gauge value,
 // it will be a flat line on the graph until you change it again
@@ -70,9 +82,33 @@ func (sb *StatsdBuffer) Gauge(stat string, value int64) error {
 	return nil
 }
 
+// GaugeDelta records a delta from the previous value (as int64)
+func (sb *StatsdBuffer) GaugeDelta(stat string, value int64) error {
+	sb.eventChannel <- &event.GaugeDelta{Name: stat, Value: value}
+	return nil
+}
+
+// FGauge is a Gauge working with float64 values
+func (sb *StatsdBuffer) FGauge(stat string, value float64) error {
+	sb.eventChannel <- &event.FGauge{Name: stat, Value: value}
+	return nil
+}
+
+// FGaugeDelta records a delta from the previous value (as float64)
+func (sb *StatsdBuffer) FGaugeDelta(stat string, value float64) error {
+	sb.eventChannel <- &event.FGaugeDelta{Name: stat, Value: value}
+	return nil
+}
+
 // Absolute - Send absolute-valued metric (not averaged/aggregated)
 func (sb *StatsdBuffer) Absolute(stat string, value int64) error {
 	sb.eventChannel <- &event.Absolute{Name: stat, Values: []int64{value}}
+	return nil
+}
+
+// FAbsolute - Send absolute-valued metric (not averaged/aggregated)
+func (sb *StatsdBuffer) FAbsolute(stat string, value float64) error {
+	sb.eventChannel <- &event.FAbsolute{Name: stat, Values: []float64{value}}
 	return nil
 }
 
@@ -98,22 +134,26 @@ func (sb *StatsdBuffer) collector() {
 	for {
 		select {
 		case <-ticker.C:
-			//fmt.Println("Flushing stats")
+			//sb.Logger.Println("Flushing stats")
 			sb.flush()
 		case e := <-sb.eventChannel:
-			//fmt.Println("Received ", e.String())
-			if e2, ok := sb.events[e.Key()]; ok {
-				//fmt.Println("Updating existing event")
+			//sb.Logger.Println("Received ", e.String())
+			// convert %HOST% in key
+			k := strings.Replace(e.Key(), "%HOST%", Hostname, 1)
+			e.SetKey(k)
+
+			if e2, ok := sb.events[k]; ok {
+				//sb.Logger.Println("Updating existing event")
 				e2.Update(e)
-				sb.events[e.Key()] = e2
+				sb.events[k] = e2
 			} else {
-				//fmt.Println("Adding new event")
-				sb.events[e.Key()] = e
+				//sb.Logger.Println("Adding new event")
+				sb.events[k] = e
 			}
 		case c := <-sb.closeChannel:
 			sb.Logger.Println("Asked to terminate. Flushing stats before returning.")
 			c.reply <- sb.flush()
-			break
+			return
 		}
 	}
 }
@@ -138,14 +178,22 @@ func (sb *StatsdBuffer) Close() (err error) {
 // This function is NOT thread-safe, so it must only be invoked synchronously
 // from within the collector() goroutine
 func (sb *StatsdBuffer) flush() (err error) {
+	n := len(sb.events)
+	if n == 0 {
+		return nil
+	}
+	err = sb.statsd.CreateSocket()
+	if nil != err {
+		sb.Logger.Println("Error establishing UDP connection for sending statsd events:", err)
+	}
 	for k, v := range sb.events {
-		err = sb.statsd.SendEvent(v)
+		err := sb.statsd.SendEvent(v)
 		if nil != err {
-			fmt.Println(err)
-			return err
+			sb.Logger.Println(err)
 		}
-		//fmt.Println("Sent", v.String())
+		//sb.Logger.Println("Sent", v.String())
 		delete(sb.events, k)
 	}
+
 	return nil
 }

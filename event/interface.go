@@ -7,6 +7,11 @@ const (
 	EventAbsolute
 	EventTotal
 	EventGauge
+	EventGaugeDelta
+	EventFGauge
+	EventFGaugeDelta
+	EventFAbsolute
+	EventPrecisionTiming
 )
 
 // Event is an interface to a generic StatsD event, used by the buffered client collator
@@ -18,4 +23,5 @@ type Event interface {
 	Update(e2 Event) error
 	String() string
 	Key() string
+	SetKey(string)
 }
