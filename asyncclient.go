@@ -131,6 +131,7 @@ func (c *AsyncClient) process() {
 
 		if !open {
 			return
+			close(c.ErrorChan)
 		}
 
 		err := req()
